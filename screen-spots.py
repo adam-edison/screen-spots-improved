@@ -11,6 +11,27 @@ from .window_title_parser import get_suggested_patterns
 mod = Module()
 ctx = Context()
 
+
+def wrap_text(text: str, width: int = 60, indent: str = "   ") -> list[str]:
+    """Wrap text to specified width, returning list of lines with indent."""
+    if len(text) <= width:
+        return [f"{indent}{text}"]
+    
+    lines = []
+    while text:
+        if len(text) <= width:
+            lines.append(f"{indent}{text}")
+            break
+        # Find a good break point (space) near the width
+        break_at = text.rfind(" ", 0, width)
+        if break_at == -1:
+            # No space found, hard break at width
+            break_at = width
+        lines.append(f"{indent}{text[:break_at]}")
+        text = text[break_at:].lstrip()
+    return lines
+
+
 # Tag for when window selection GUI is open
 mod.tag("screen_spots_selecting", desc="Tag for when the window pattern selection GUI is open")
 
@@ -218,18 +239,16 @@ def gui_select_window_pattern(gui: imgui.GUI):
         desc = suggestion["description"]
         stype = suggestion["type"]
         
-        # Truncate long patterns for display
-        display_pattern = pattern if len(pattern) <= 45 else pattern[:42] + "..."
-        
         # Show type indicator
         type_label = f"[{stype}]" if stype != "segment" else ""
         
-        if gui.button(f"{i}. {display_pattern} {type_label}"):
+        # Button with number and type, full pattern on next line(s)
+        if gui.button(f"{i}. {type_label} {desc}"):
             actions.user.spot_confirm_window_pattern(i)
         
-        # Show description on separate line for clarity
-        if desc and desc != "Title segment":
-            gui.text(f"      {desc}")
+        # Show full pattern below the button, wrapped if needed
+        for line in wrap_text(pattern, width=40):
+            gui.text(line)
     
     gui.spacer()
     gui.line()

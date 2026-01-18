@@ -227,7 +227,6 @@ def gui_select_window_pattern(gui: imgui.GUI):
     gui.text("Voice commands:")
     gui.text('  "choose <number>" - select a pattern')
     gui.text('  "choose global" - save without window matching')
-    gui.text('  "choose custom <text>" - type your own pattern')
     gui.text('  "spot cancel" - cancel and don\'t save')
     gui.line()
     

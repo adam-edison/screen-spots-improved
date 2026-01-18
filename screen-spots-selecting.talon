@@ -6,7 +6,7 @@ tag: user.screen_spots_selecting
 choose <number_small>: user.spot_confirm_window_pattern(number_small)
 
 # Save as global (no window matching)
-choose global: user.spot_confirm_window_pattern(0)
+choose (all|free|wide|base|global): user.spot_confirm_window_pattern(0)
 
 # Type a custom pattern (say the text you want to match)
 choose custom <user.text>: user.spot_confirm_custom_pattern(user.text)

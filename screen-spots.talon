@@ -1,9 +1,14 @@
 mode: command
 -
-# === GLOBAL SPOTS (work in any window) ===
+# === SAVING SPOTS ===
 
-# save a mouse position as a global spot
-spot save <user.text>: user.save_spot(user.text)
+# save a mouse position as a window-specific spot (shows selection GUI)
+spot save <user.text>: user.save_spot_window(user.text)
+
+# save a mouse position as a global spot (works in any window)
+spot save (all|free|wide|base) <user.text>: user.save_spot(user.text)
+
+# === USING SPOTS ===
 
 # click a saved spot then return the cursor to its prior position
 spot [(click|touch)] <user.text>: user.click_spot(user.text)
@@ -16,10 +21,7 @@ spot drag <user.text>: user.drag_spot(user.text)
 
 spot swipe <user.text>: user.drag_spot(user.text, 1)
 
-# === WINDOW-SPECIFIC SPOTS (only work in matching windows) ===
-
-# save a mouse position as a window-specific spot (shows selection GUI)
-spot save window <user.text>: user.save_spot_window(user.text)
+# === WINDOW-ONLY ACCESS (explicit window-spot-only) ===
 
 # click a window-specific spot (only if current window matches)
 spot window [(click|touch)] <user.text>: user.click_spot_window(user.text)

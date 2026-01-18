@@ -1,8 +1,9 @@
 import csv
 import os
+import socket
+import re
 from pathlib import Path
-from talon import ctrl, Module, actions, imgui, ui, canvas, settings, resource, app, Context
-
+from talon import ctrl, Module, actions, imgui, ui, canvas, settings, app, Context
 from talon.skia import Paint
 
 # Import the parser from our separate module
@@ -58,38 +59,95 @@ mod.setting(
 
 # CSV file path - stored in same directory as this script
 SPOTS_DIR = Path(__file__).parent
-SPOTS_FILE = SPOTS_DIR / "screen-spots.csv"
+OLD_SPOTS_FILE = SPOTS_DIR / "screen-spots.csv"  # Legacy file for migration
 CSV_HEADERS = ("Name", "X", "Y", "WindowPattern")
 
-# Spot dictionary: {name: {"coords": [x, y], "window_pattern": str or None}}
+# Spot dictionary: {profile: {name: {"coords": [x, y], "window_pattern": str or None}}}
+# Profile format: "{hostname}-{screen_index}-{width}x{height}"
 spot_dictionary = {}
+
+# Currently active profiles (for screens that are connected)
+active_profiles = []
 
 heatmap_showing = False
 
 # State for the window pattern selection GUI
 pending_spot_name = None
 pending_spot_coords = None
+pending_spot_screen_index = None  # Track which screen the spot is being saved for
 pending_suggestions = []  # List of {"pattern": str, "description": str, "type": str}
 pending_custom_pattern = ""  # For custom text input
 
 
-def ensure_csv_exists():
+# ============ Profile Detection Functions ============
+
+def get_hostname() -> str:
+    """Get the machine hostname (without domain suffix)"""
+    hostname = socket.gethostname()
+    # Remove .local or other domain suffixes
+    if "." in hostname:
+        hostname = hostname.split(".")[0]
+    return hostname
+
+
+def get_screen_profile(screen_index: int) -> str:
+    """Get the profile key for a specific screen index"""
+    screens = ui.screens()
+    if screen_index < 0 or screen_index >= len(screens):
+        screen_index = 0
+    screen = screens[screen_index]
+    hostname = get_hostname()
+    width = int(screen.rect.width)
+    height = int(screen.rect.height)
+    return f"{hostname}-{screen_index}-{width}x{height}"
+
+
+def get_all_current_profiles() -> list[str]:
+    """Get profile keys for all currently connected screens"""
+    profiles = []
+    for i in range(len(ui.screens())):
+        profiles.append(get_screen_profile(i))
+    return profiles
+
+
+def get_screen_for_point(x: int, y: int) -> int:
+    """Determine which screen contains the given point"""
+    screens = ui.screens()
+    for i, screen in enumerate(screens):
+        if screen.rect.contains(x, y):
+            return i
+    # Fallback to main screen
+    return 0
+
+
+def get_profile_csv_path(profile: str) -> Path:
+    """Get the CSV file path for a specific profile"""
+    # Sanitize profile for filesystem (replace any problematic chars)
+    safe_profile = re.sub(r'[<>:"/\\|?*]', '_', profile)
+    return SPOTS_DIR / f"screen-spots-{safe_profile}.csv"
+
+
+# ============ CSV File Operations ============
+
+def ensure_csv_exists(profile: str):
     """Create the CSV file with headers if it doesn't exist"""
-    if not SPOTS_FILE.is_file():
-        with open(SPOTS_FILE, "w", encoding="utf-8", newline="") as f:
+    csv_path = get_profile_csv_path(profile)
+    if not csv_path.is_file():
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(CSV_HEADERS)
 
 
-def load_spots_from_csv():
-    """Load spots from CSV file into spot_dictionary"""
-    global spot_dictionary
-    spot_dictionary = {}
+def load_spots_for_profile(profile: str) -> dict:
+    """Load spots from a profile's CSV file"""
+    spots = {}
+    csv_path = get_profile_csv_path(profile)
     
-    ensure_csv_exists()
+    if not csv_path.is_file():
+        return spots
     
     try:
-        with open(SPOTS_FILE, "r", encoding="utf-8") as f:
+        with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 name = row.get("Name", "").strip()
@@ -99,47 +157,134 @@ def load_spots_from_csv():
                     x = int(row.get("X", 0))
                     y = int(row.get("Y", 0))
                     window_pattern = row.get("WindowPattern", "").strip() or None
-                    spot_dictionary[name] = {
+                    spots[name] = {
                         "coords": [x, y],
                         "window_pattern": window_pattern
                     }
                 except (ValueError, TypeError):
                     continue
     except Exception as e:
-        app.notify(f"Error loading spots: {e}")
+        app.notify(f"Error loading spots for {profile}: {e}")
+    
+    return spots
 
 
-def save_spots_to_csv():
-    """Save all spots to CSV file"""
-    ensure_csv_exists()
+def load_all_spots():
+    """Load spots from all profile CSVs for currently connected screens"""
+    global spot_dictionary, active_profiles
+    spot_dictionary = {}
+    active_profiles = get_all_current_profiles()
+    
+    for profile in active_profiles:
+        spots = load_spots_for_profile(profile)
+        if spots:
+            spot_dictionary[profile] = spots
+        else:
+            # Initialize empty dict for this profile
+            spot_dictionary[profile] = {}
+    
+    # Count total spots loaded
+    total = sum(len(spots) for spots in spot_dictionary.values())
+    profiles_with_spots = [p for p, s in spot_dictionary.items() if s]
+    if profiles_with_spots:
+        app.notify(f"Loaded {total} spots from {len(profiles_with_spots)} profile(s)")
+
+
+def save_spots_for_profile(profile: str):
+    """Save spots for a specific profile to its CSV file"""
+    ensure_csv_exists(profile)
+    csv_path = get_profile_csv_path(profile)
+    
+    spots = spot_dictionary.get(profile, {})
     
     try:
-        with open(SPOTS_FILE, "w", encoding="utf-8", newline="") as f:
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(CSV_HEADERS)
-            for name, spot in spot_dictionary.items():
+            for name, spot in spots.items():
                 coords = spot["coords"]
                 window_pattern = spot.get("window_pattern") or ""
                 writer.writerow([name, coords[0], coords[1], window_pattern])
     except Exception as e:
-        app.notify(f"Error saving spots: {e}")
+        app.notify(f"Error saving spots for {profile}: {e}")
 
 
-def add_spot_to_csv(name: str, x: int, y: int, window_pattern: str = None):
-    """Add or update a single spot in the dictionary and save to CSV"""
-    spot_dictionary[name] = {
+def add_spot(name: str, x: int, y: int, window_pattern: str = None, screen_index: int = None):
+    """Add or update a spot for a specific screen"""
+    if screen_index is None:
+        screen_index = get_screen_for_point(x, y)
+    
+    profile = get_screen_profile(screen_index)
+    
+    # Ensure profile exists in dictionary
+    if profile not in spot_dictionary:
+        spot_dictionary[profile] = {}
+    
+    spot_dictionary[profile][name] = {
         "coords": [x, y],
         "window_pattern": window_pattern
     }
-    save_spots_to_csv()
+    
+    save_spots_for_profile(profile)
     refresh()
+    
+    return profile
 
 
-# Watch the CSV file for external changes
-@resource.watch(str(SPOTS_FILE))
-def on_spots_file_change(f):
-    load_spots_from_csv()
-    refresh()
+def migrate_old_spots():
+    """One-time migration from old single CSV to profile-based CSVs"""
+    if not OLD_SPOTS_FILE.is_file():
+        return
+    
+    # Check if we've already migrated (if any profile CSVs exist)
+    existing_profile_csvs = list(SPOTS_DIR.glob("screen-spots-*.csv"))
+    # Filter out the old file if it matches the pattern somehow
+    existing_profile_csvs = [p for p in existing_profile_csvs if p != OLD_SPOTS_FILE]
+    
+    if existing_profile_csvs:
+        # Already have profile-based files, skip migration
+        return
+    
+    # Load old spots
+    old_spots = {}
+    try:
+        with open(OLD_SPOTS_FILE, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                name = row.get("Name", "").strip()
+                if not name:
+                    continue
+                try:
+                    x = int(row.get("X", 0))
+                    y = int(row.get("Y", 0))
+                    window_pattern = row.get("WindowPattern", "").strip() or None
+                    old_spots[name] = {
+                        "coords": [x, y],
+                        "window_pattern": window_pattern
+                    }
+                except (ValueError, TypeError):
+                    continue
+    except Exception as e:
+        app.notify(f"Error reading old spots file: {e}")
+        return
+    
+    if not old_spots:
+        return
+    
+    # Migrate to main screen's profile (screen 0)
+    profile = get_screen_profile(0)
+    spot_dictionary[profile] = old_spots
+    save_spots_for_profile(profile)
+    
+    # Rename old file to backup
+    backup_path = SPOTS_DIR / "screen-spots-migrated-backup.csv"
+    try:
+        OLD_SPOTS_FILE.rename(backup_path)
+        app.notify(f"Migrated {len(old_spots)} spots to {profile}. Old file backed up.")
+
+
+    except Exception as e:
+        app.notify(f"Error during migration: {e}")
 
 
 def get_current_window_title() -> str:
@@ -160,7 +305,6 @@ def get_current_app_name() -> str:
 
 def spot_matches_current_window(spot: dict) -> bool:
     """Check if a spot matches the current window (or is global)"""
-    import re
     window_pattern = spot.get("window_pattern")
     
     if window_pattern is None:
@@ -187,30 +331,43 @@ def spot_matches_current_window(spot: dict) -> bool:
     return window_pattern.lower() in current_title.lower()
 
 
-def get_spot_coords(spot_key: str, window_only: bool = False) -> list | None:
+def get_spot_coords(spot_key: str, window_only: bool = False) -> tuple[list, str] | tuple[None, None]:
     """
-    Get coordinates for a spot.
+    Get coordinates for a spot across all active profiles.
     If window_only is True, only return if spot has a window pattern AND matches current window.
     Otherwise, return if spot matches current window (global spots always match).
-    Returns [x, y] or None if not found or doesn't match.
+    Returns (coords [x, y], profile) or (None, None) if not found or doesn't match.
     """
-    if spot_key not in spot_dictionary:
-        return None
+    # Search through all active profiles
+    for profile in active_profiles:
+        profile_spots = spot_dictionary.get(profile, {})
+        if spot_key not in profile_spots:
+            continue
+        
+        spot = profile_spots[spot_key]
+        
+        if window_only:
+            # Only return window-specific spots that match
+            if spot.get("window_pattern") is None:
+                continue  # Skip global spots
+            if not spot_matches_current_window(spot):
+                continue  # Window pattern doesn't match
+            return spot["coords"], profile
+        else:
+            # Return if spot matches (global always matches, window-specific must match)
+            if spot_matches_current_window(spot):
+                return spot["coords"], profile
     
-    spot = spot_dictionary[spot_key]
-    
-    if window_only:
-        # Only return window-specific spots that match
-        if spot.get("window_pattern") is None:
-            return None  # Skip global spots
-        if not spot_matches_current_window(spot):
-            return None  # Window pattern doesn't match
-        return spot["coords"]
-    else:
-        # Return if spot matches (global always matches, window-specific must match)
-        if spot_matches_current_window(spot):
-            return spot["coords"]
-        return None
+    return None, None
+
+
+def find_spot_profile(spot_key: str) -> str | None:
+    """Find which profile a spot belongs to"""
+    for profile in active_profiles:
+        profile_spots = spot_dictionary.get(profile, {})
+        if spot_key in profile_spots:
+            return profile
+    return None
 
 
 # ============ Window Pattern Selection GUI ============
@@ -218,9 +375,15 @@ def get_spot_coords(spot_key: str, window_only: bool = False) -> list | None:
 @imgui.open(y=0)
 def gui_select_window_pattern(gui: imgui.GUI):
     """GUI for selecting which part of the window title to match"""
-    global pending_spot_name, pending_spot_coords, pending_suggestions
+    global pending_spot_name, pending_spot_coords, pending_suggestions, pending_spot_screen_index
     
-    gui.text(f"Save spot: {pending_spot_name}")
+    # Show which screen/profile this will be saved to
+    if pending_spot_screen_index is not None:
+        profile = get_screen_profile(pending_spot_screen_index)
+        gui.text(f"Save spot: {pending_spot_name}")
+        gui.text(f"Screen: {pending_spot_screen_index} ({profile})")
+    else:
+        gui.text(f"Save spot: {pending_spot_name}")
     gui.line()
     
     # Instructions
@@ -270,22 +433,31 @@ def gui_list_keys(gui: imgui.GUI):
 
     current_title = get_current_window_title()
     current_app = get_current_app_name()
-    for key, spot in spot_dictionary.items():
-        window_pattern = spot.get("window_pattern")
-        if window_pattern is None:
-            gui.text(f"{key} (global)")
-        elif window_pattern.startswith("app:"):
-            app_pattern = window_pattern[4:]
-            if app_pattern.lower() in current_app.lower():
-                gui.text(f"{key} (this app: {app_pattern})")
+    
+    # Show spots grouped by profile
+    for profile in active_profiles:
+        profile_spots = spot_dictionary.get(profile, {})
+        if not profile_spots:
+            continue
+        
+        gui.text(f"[{profile}]")
+        
+        for key, spot in profile_spots.items():
+            window_pattern = spot.get("window_pattern")
+            if window_pattern is None:
+                gui.text(f"  {key} (global)")
+            elif window_pattern.startswith("app:"):
+                app_pattern = window_pattern[4:]
+                if app_pattern.lower() in current_app.lower():
+                    gui.text(f"  {key} (this app: {app_pattern})")
+                else:
+                    gui.text(f"  {key} (app: {app_pattern})")
+            elif window_pattern.lower() in current_title.lower():
+                gui.text(f"  {key} (this window: {window_pattern})")
             else:
-                gui.text(f"{key} (app: {app_pattern})")
-        elif window_pattern.lower() in current_title.lower():
-            gui.text(f"{key} (this window: {window_pattern})")
-        else:
-            gui.text(f"{key} (window: {window_pattern})")
-
-    gui.spacer()
+                gui.text(f"  {key} (window: {window_pattern})")
+        
+        gui.spacer()
 
     if gui.button("Close"):
         actions.user.close_spot_list()
@@ -293,23 +465,47 @@ def gui_list_keys(gui: imgui.GUI):
 
 # ============ Heatmap Canvas ============
 
-can = canvas.Canvas.from_screen(ui.main_screen())
+# We'll create canvases for each screen dynamically
+heatmap_canvases = []
 
-def draw_spot(canvas):
-    canvas.paint.color = settings.get('user.screen_spots_heatmap_color')
-    canvas.paint.style = Paint.Style.FILL
-    for key, spot in spot_dictionary.items():
-        # Only draw spots that match current window
-        if spot_matches_current_window(spot):
-            coords = spot["coords"]
-            canvas.draw_circle(coords[0], coords[1], settings.get('user.screen_spots_heatmap_size'))
 
-can.register('draw', draw_spot)
-can.hide()
+def setup_heatmap_canvases():
+    """Create a canvas for each screen"""
+    global heatmap_canvases
+    
+    # Close existing canvases
+    for can in heatmap_canvases:
+        can.close()
+    heatmap_canvases = []
+    
+    # Create a canvas for each screen
+    for screen in ui.screens():
+        can = canvas.Canvas.from_screen(screen)
+        can.register('draw', draw_spot)
+        can.hide()
+        heatmap_canvases.append(can)
+
+
+def draw_spot(c):
+    c.paint.color = settings.get('user.screen_spots_heatmap_color')
+    c.paint.style = Paint.Style.FILL
+    
+    # Draw spots from all active profiles
+    for profile in active_profiles:
+        profile_spots = spot_dictionary.get(profile, {})
+        for key, spot in profile_spots.items():
+            # Only draw spots that match current window
+            if spot_matches_current_window(spot):
+                coords = spot["coords"]
+                # Check if this spot's coords are on this canvas's screen
+                if c.rect.contains(coords[0], coords[1]):
+                    c.draw_circle(coords[0], coords[1], settings.get('user.screen_spots_heatmap_size'))
+
 
 def refresh():
     if heatmap_showing:
-        can.freeze()
+        for can in heatmap_canvases:
+            can.freeze()
 
 
 # ============ Actions ============
@@ -320,15 +516,17 @@ class SpotClass:
         """Saves the current mouse position as a global spot (works in any window)"""
         x = int(actions.mouse_x())
         y = int(actions.mouse_y())
-        add_spot_to_csv(spot_key, x, y, None)
-        app.notify(f"Saved global spot: {spot_key}")
+        screen_index = get_screen_for_point(x, y)
+        profile = add_spot(spot_key, x, y, None, screen_index)
+        app.notify(f"Saved global spot: {spot_key} [{profile}]")
 
     def save_spot_window(spot_key: str):
         """Opens GUI to save mouse position as a window-specific spot"""
-        global pending_spot_name, pending_spot_coords, pending_suggestions
+        global pending_spot_name, pending_spot_coords, pending_suggestions, pending_spot_screen_index
         
-        pending_spot_name = spot_key
         pending_spot_coords = [int(actions.mouse_x()), int(actions.mouse_y())]
+        pending_spot_name = spot_key
+        pending_spot_screen_index = get_screen_for_point(pending_spot_coords[0], pending_spot_coords[1])
         
         current_title = get_current_window_title()
         current_app = get_current_app_name()
@@ -346,8 +544,8 @@ class SpotClass:
         
         if not pending_suggestions:
             # No title or app to parse, save as global
-            add_spot_to_csv(spot_key, pending_spot_coords[0], pending_spot_coords[1], None)
-            app.notify(f"Saved global spot (no window info): {spot_key}")
+            profile = add_spot(spot_key, pending_spot_coords[0], pending_spot_coords[1], None, pending_spot_screen_index)
+            app.notify(f"Saved global spot (no window info): {spot_key} [{profile}]")
             return
         
         ctx.tags = ["user.screen_spots_selecting"]
@@ -355,7 +553,7 @@ class SpotClass:
 
     def spot_confirm_window_pattern(choice: int):
         """Confirm the window pattern selection (0 = global, 1+ = suggestion index)"""
-        global pending_spot_name, pending_spot_coords, pending_suggestions
+        global pending_spot_name, pending_spot_coords, pending_suggestions, pending_spot_screen_index
         
         if pending_spot_name is None or pending_spot_coords is None:
             actions.user.spot_cancel_window_selection()
@@ -372,15 +570,15 @@ class SpotClass:
             app.notify(f"Invalid choice: {choice}")
             return
         
-        add_spot_to_csv(pending_spot_name, pending_spot_coords[0], pending_spot_coords[1], window_pattern)
-        app.notify(f"Saved spot: {pending_spot_name} ({pattern_desc})")
+        profile = add_spot(pending_spot_name, pending_spot_coords[0], pending_spot_coords[1], window_pattern, pending_spot_screen_index)
+        app.notify(f"Saved spot: {pending_spot_name} ({pattern_desc}) [{profile}]")
         
         # Cleanup
         actions.user.spot_cancel_window_selection()
 
     def spot_confirm_custom_pattern(pattern: str):
         """Confirm a custom window pattern typed by the user"""
-        global pending_spot_name, pending_spot_coords
+        global pending_spot_name, pending_spot_coords, pending_spot_screen_index
         
         if pending_spot_name is None or pending_spot_coords is None:
             actions.user.spot_cancel_window_selection()
@@ -395,29 +593,32 @@ class SpotClass:
             window_pattern = pattern
             pattern_desc = f"window: {window_pattern}"
         
-        add_spot_to_csv(pending_spot_name, pending_spot_coords[0], pending_spot_coords[1], window_pattern)
-        app.notify(f"Saved spot: {pending_spot_name} ({pattern_desc})")
+        profile = add_spot(pending_spot_name, pending_spot_coords[0], pending_spot_coords[1], window_pattern, pending_spot_screen_index)
+        app.notify(f"Saved spot: {pending_spot_name} ({pattern_desc}) [{profile}]")
         
         # Cleanup
         actions.user.spot_cancel_window_selection()
 
     def spot_cancel_window_selection():
         """Cancel the window pattern selection"""
-        global pending_spot_name, pending_spot_coords, pending_suggestions
+        global pending_spot_name, pending_spot_coords, pending_suggestions, pending_spot_screen_index
         pending_spot_name = None
         pending_spot_coords = None
         pending_suggestions = []
+        pending_spot_screen_index = None
         ctx.tags = []
         gui_select_window_pattern.hide()
 
     def toggle_spot_heatmap():
-        """Display the spot on the screen"""
-        global can, heatmap_showing
+        """Display the spots on all screens"""
+        global heatmap_showing
         if heatmap_showing:
-            can.hide()
+            for can in heatmap_canvases:
+                can.hide()
             heatmap_showing = False
         else:
-            can.freeze()
+            for can in heatmap_canvases:
+                can.freeze()
             heatmap_showing = True
 
     def move_to_spot(spot_key: str) -> bool:
@@ -426,7 +627,7 @@ class SpotClass:
         and matches the current window.
         Returns true if the cursor was moved.
         """
-        coords = get_spot_coords(spot_key, window_only=False)
+        coords, profile = get_spot_coords(spot_key, window_only=False)
         if coords:
             if settings.get('user.screen_spots_slow_move_enabled'):
                 actions.user.slow_mouse_move(coords[0], coords[1])
@@ -440,7 +641,7 @@ class SpotClass:
         Moves the cursor to a window-specific spot only.
         Returns true if the cursor was moved (only if spot has window pattern AND matches).
         """
-        coords = get_spot_coords(spot_key, window_only=True)
+        coords, profile = get_spot_coords(spot_key, window_only=True)
         if coords:
             if settings.get('user.screen_spots_slow_move_enabled'):
                 actions.user.slow_mouse_move(coords[0], coords[1])
@@ -481,7 +682,7 @@ class SpotClass:
 
     def drag_spot(spot_key: str, release_drag: int = 0):
         """Drag the mouse from its current location to the saved position (if it exists)"""
-        coords = get_spot_coords(spot_key, window_only=False)
+        coords, profile = get_spot_coords(spot_key, window_only=False)
         if coords:
             actions.user.mouse_drag(0)
             actions.user.move_to_spot(spot_key)
@@ -490,32 +691,43 @@ class SpotClass:
                 actions.mouse_release(0)
 
     def clear_spot_dictionary():
-        """Reset the active spot list to a new empty dictionary"""
+        """Reset all spots for all active profiles"""
         global spot_dictionary
-        spot_dictionary = {}
-        save_spots_to_csv()
+        for profile in active_profiles:
+            spot_dictionary[profile] = {}
+            save_spots_for_profile(profile)
         refresh()
+        app.notify("Cleared all spots for current screens")
 
     def clear_spot_dictionary_window():
-        """Remove all spots specific to the current window pattern"""
+        """Remove all spots specific to the current window pattern (across all profiles)"""
         global spot_dictionary
         current_title = get_current_window_title()
-        # Remove spots that match the current window (but not global spots)
-        spot_dictionary = {
-            k: v for k, v in spot_dictionary.items()
-            if v.get("window_pattern") is None or 
-               v.get("window_pattern", "").lower() not in current_title.lower()
-        }
-        save_spots_to_csv()
+        
+        for profile in active_profiles:
+            profile_spots = spot_dictionary.get(profile, {})
+            # Remove spots that match the current window (but not global spots)
+            spot_dictionary[profile] = {
+                k: v for k, v in profile_spots.items()
+                if v.get("window_pattern") is None or 
+                   v.get("window_pattern", "").lower() not in current_title.lower()
+            }
+            save_spots_for_profile(profile)
+        
         refresh()
 
     def clear_spot(spot_key: str):
-        """Remove a specific saved spot"""
+        """Remove a specific saved spot from whichever profile it's in"""
         global spot_dictionary
-        if spot_key in spot_dictionary:
-            del spot_dictionary[spot_key]
-            save_spots_to_csv()
+        
+        profile = find_spot_profile(spot_key)
+        if profile:
+            del spot_dictionary[profile][spot_key]
+            save_spots_for_profile(profile)
             refresh()
+            app.notify(f"Cleared spot: {spot_key}")
+        else:
+            app.notify(f"Spot not found: {spot_key}")
 
     def list_spot():
         """Display a list of existing spot names"""
@@ -526,36 +738,76 @@ class SpotClass:
         gui_list_keys.hide()
 
     def edit_spots_file():
-        """Open the spots CSV file for editing"""
-        ensure_csv_exists()
+        """Open the spots CSV file for the main screen's profile"""
+        profile = get_screen_profile(0)
+        ensure_csv_exists(profile)
+        csv_path = get_profile_csv_path(profile)
         # Use platform-specific open command
         if app.platform == "mac":
             import subprocess
-            subprocess.run(["open", "-t", str(SPOTS_FILE)])
+            subprocess.run(["open", "-t", str(csv_path)])
         elif app.platform == "windows":
-            os.startfile(str(SPOTS_FILE))
+            os.startfile(str(csv_path))
         else:
             import subprocess
-            subprocess.run(["xdg-open", str(SPOTS_FILE)])
+            subprocess.run(["xdg-open", str(csv_path)])
+
+    def reload_spots():
+        """Manually reload spots from CSV files for current screens"""
+        load_all_spots()
+        setup_heatmap_canvases()
+        refresh()
+
+    def show_spot_profiles():
+        """Show current screen profiles"""
+        profiles = get_all_current_profiles()
+        for i, profile in enumerate(profiles):
+            app.notify(f"Screen {i}: {profile}")
 
 
 # Initialize by loading from CSV (or migrating from old storage)
 def migrate_from_storage():
-    """One-time migration from old storage format to CSV"""
+    """One-time migration from old Talon storage format to CSV"""
     from talon import storage
     old_data = storage.get("screen-spots", {})
-    if old_data and not SPOTS_FILE.exists():
-        ensure_csv_exists()
+    
+    # Check if we already have profile-based CSVs
+    existing_profile_csvs = list(SPOTS_DIR.glob("screen-spots-*.csv"))
+    existing_profile_csvs = [p for p in existing_profile_csvs if p.name != "screen-spots.csv"]
+    
+    if old_data and not existing_profile_csvs:
+        # Migrate to main screen's profile
+        profile = get_screen_profile(0)
+        spots = {}
         for name, value in old_data.items():
             if isinstance(value, list):
                 # Old format: [x, y]
-                add_spot_to_csv(name, int(value[0]), int(value[1]), None)
+                spots[name] = {"coords": [int(value[0]), int(value[1])], "window_pattern": None}
             elif isinstance(value, dict) and "coords" in value:
                 # Intermediate format with app
                 coords = value["coords"]
-                add_spot_to_csv(name, int(coords[0]), int(coords[1]), None)
-        app.notify("Migrated spots to CSV file")
+                spots[name] = {"coords": [int(coords[0]), int(coords[1])], "window_pattern": None}
+        
+        if spots:
+            spot_dictionary[profile] = spots
+            save_spots_for_profile(profile)
+            app.notify(f"Migrated {len(spots)} spots from Talon storage to {profile}")
 
-# Run migration and initial load
-migrate_from_storage()
-load_spots_from_csv()
+
+def initialize():
+    """Initialize the spots system"""
+    # First, try to migrate from old Talon storage
+    migrate_from_storage()
+    
+    # Then migrate from old single CSV file
+    migrate_old_spots()
+    
+    # Load spots for current screen configuration
+    load_all_spots()
+    
+    # Setup heatmap canvases
+    setup_heatmap_canvases()
+
+
+# Run initialization on startup
+app.register("ready", lambda: initialize())

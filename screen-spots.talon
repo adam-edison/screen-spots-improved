@@ -51,3 +51,9 @@ spot [toggle] heatmap: user.toggle_spot_heatmap()
 
 # open the spots CSV file for manual editing
 spot edit file: user.edit_spots_file()
+
+# reload spots from CSV files (useful after external edits or screen changes)
+spot reload: user.reload_spots()
+
+# show current screen profiles
+spot profiles: user.show_spot_profiles()

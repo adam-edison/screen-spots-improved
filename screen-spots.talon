@@ -1,6 +1,8 @@
 mode: command
 -
-# save a mouse position to a spot name
+# === GLOBAL SPOTS (work in any window) ===
+
+# save a mouse position as a global spot
 spot save <user.text>: user.save_spot(user.text)
 
 # click a saved spot then return the cursor to its prior position
@@ -14,17 +16,36 @@ spot drag <user.text>: user.drag_spot(user.text)
 
 spot swipe <user.text>: user.drag_spot(user.text, 1)
 
-# deletes all current spots (does not alter the cached dictionary of spots)
+# === WINDOW-SPECIFIC SPOTS (only work in matching windows) ===
+
+# save a mouse position as a window-specific spot (shows selection GUI)
+spot save window <user.text>: user.save_spot_window(user.text)
+
+# click a window-specific spot (only if current window matches)
+spot window [(click|touch)] <user.text>: user.click_spot_window(user.text)
+
+# move to a window-specific spot (only if current window matches)
+spot window move <user.text>: user.move_to_spot_window(user.text)
+
+# === MANAGEMENT ===
+
+# deletes all current spots
 spot clear all: user.clear_spot_dictionary()
 
-# delete a specific spot (does not alter the cached dictionary of spots)
+# deletes all spots that match the current window
+spot clear all window: user.clear_spot_dictionary_window()
+
+# delete a specific spot
 spot clear <user.text>: user.clear_spot(user.text)
 
-# display a list of all active spot names
+# display a list of all active spot names (shows global vs window-specific)
 spot list [all]: user.list_spot()
 
 # Close the list of active spot names. including 'clothes' because that's commonly misheard by talon
 spot (close|clothes)$: user.close_spot_list()
 
-# displays a small colored circle at the location of each saved spot
+# displays a small colored circle at the location of each saved spot (only shows spots relevant to current window)
 spot [toggle] heatmap: user.toggle_spot_heatmap()
+
+# open the spots CSV file for manual editing
+spot edit file: user.edit_spots_file()

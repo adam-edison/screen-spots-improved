@@ -1,10 +1,12 @@
 import csv
 import os
-import re
 from pathlib import Path
 from talon import ctrl, Module, actions, imgui, ui, canvas, settings, resource, app, Context
 
 from talon.skia import Paint
+
+# Import the parser from our separate module
+from .window_title_parser import get_suggested_patterns
 
 mod = Module()
 ctx = Context()
@@ -46,7 +48,8 @@ heatmap_showing = False
 # State for the window pattern selection GUI
 pending_spot_name = None
 pending_spot_coords = None
-window_title_segments = []
+pending_suggestions = []  # List of {"pattern": str, "description": str, "type": str}
+pending_custom_pattern = ""  # For custom text input
 
 
 def ensure_csv_exists():
@@ -126,37 +129,9 @@ def get_current_window_title() -> str:
         return ""
 
 
-def parse_window_title_segments(title: str) -> list[str]:
-    """
-    Parse a window title into segments by splitting on common delimiters.
-    Returns unique segments plus the full title.
-    """
-    if not title:
-        return []
-    
-    # Split by common delimiters: " - ", " | ", ": ", " — " (em dash)
-    segments = re.split(r'\s+[-|—]\s+|:\s+', title)
-    
-    # Clean up and filter empty segments
-    segments = [s.strip() for s in segments if s.strip()]
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_segments = []
-    for seg in segments:
-        if seg not in seen:
-            seen.add(seg)
-            unique_segments.append(seg)
-    
-    # Add the full title at the end if it's different from any segment
-    if title not in seen:
-        unique_segments.append(title)
-    
-    return unique_segments
-
-
 def spot_matches_current_window(spot: dict) -> bool:
     """Check if a spot matches the current window (or is global)"""
+    import re
     window_pattern = spot.get("window_pattern")
     
     if window_pattern is None:
@@ -164,7 +139,16 @@ def spot_matches_current_window(spot: dict) -> bool:
         return True
     
     current_title = get_current_window_title()
-    # Case-insensitive partial match
+    
+    # Check if it's a regex pattern (combined pattern with lookaheads)
+    if window_pattern.startswith("(?="):
+        try:
+            return bool(re.search(window_pattern, current_title, re.IGNORECASE))
+        except re.error:
+            # Invalid regex, fall back to substring match
+            return window_pattern.lower() in current_title.lower()
+    
+    # Simple case-insensitive partial match
     return window_pattern.lower() in current_title.lower()
 
 
@@ -199,21 +183,47 @@ def get_spot_coords(spot_key: str, window_only: bool = False) -> list | None:
 @imgui.open(y=0)
 def gui_select_window_pattern(gui: imgui.GUI):
     """GUI for selecting which part of the window title to match"""
-    global pending_spot_name, pending_spot_coords, window_title_segments
+    global pending_spot_name, pending_spot_coords, pending_suggestions
     
     gui.text(f"Save spot: {pending_spot_name}")
     gui.line()
+    
+    # Instructions
+    gui.text("Voice commands:")
+    gui.text('  "choose <number>" - select a pattern')
+    gui.text('  "choose global" - save without window matching')
+    gui.text('  "choose custom <text>" - type your own pattern')
+    gui.text('  "spot cancel" - cancel and don\'t save')
+    gui.line()
+    
     gui.text("Select window pattern to match:")
     gui.spacer()
     
-    for i, segment in enumerate(window_title_segments, 1):
-        display_text = segment if len(segment) <= 40 else segment[:37] + "..."
-        if gui.button(f"Choose {i}: {display_text}"):
+    for i, suggestion in enumerate(pending_suggestions, 1):
+        pattern = suggestion["pattern"]
+        desc = suggestion["description"]
+        stype = suggestion["type"]
+        
+        # Truncate long patterns for display
+        display_pattern = pattern if len(pattern) <= 45 else pattern[:42] + "..."
+        
+        # Show type indicator
+        type_label = f"[{stype}]" if stype != "segment" else ""
+        
+        if gui.button(f"{i}. {display_pattern} {type_label}"):
             actions.user.spot_confirm_window_pattern(i)
+        
+        # Show description on separate line for clarity
+        if desc and desc != "Title segment":
+            gui.text(f"      {desc}")
     
     gui.spacer()
-    if gui.button("Save as global (no window match)"):
+    gui.line()
+    
+    if gui.button("Save as GLOBAL (works in any window)"):
         actions.user.spot_confirm_window_pattern(0)
+    
+    gui.spacer()
     
     if gui.button("Cancel"):
         actions.user.spot_cancel_window_selection()
@@ -223,6 +233,7 @@ def gui_select_window_pattern(gui: imgui.GUI):
 def gui_list_keys(gui: imgui.GUI):
     """GUI for listing all spots"""
     gui.text("Spot Names")
+    gui.text('Say "spot close" to close')
     gui.line()
 
     current_title = get_current_window_title()
@@ -237,7 +248,7 @@ def gui_list_keys(gui: imgui.GUI):
 
     gui.spacer()
 
-    if gui.button("Spot close"):
+    if gui.button("Close"):
         actions.user.close_spot_list()
 
 
@@ -275,15 +286,15 @@ class SpotClass:
 
     def save_spot_window(spot_key: str):
         """Opens GUI to save mouse position as a window-specific spot"""
-        global pending_spot_name, pending_spot_coords, window_title_segments
+        global pending_spot_name, pending_spot_coords, pending_suggestions
         
         pending_spot_name = spot_key
         pending_spot_coords = [int(actions.mouse_x()), int(actions.mouse_y())]
         
         current_title = get_current_window_title()
-        window_title_segments = parse_window_title_segments(current_title)
+        pending_suggestions = get_suggested_patterns(current_title)
         
-        if not window_title_segments:
+        if not pending_suggestions:
             # No title to parse, save as global
             add_spot_to_csv(spot_key, pending_spot_coords[0], pending_spot_coords[1], None)
             app.notify(f"Saved global spot (no window title): {spot_key}")
@@ -293,8 +304,8 @@ class SpotClass:
         gui_select_window_pattern.show()
 
     def spot_confirm_window_pattern(choice: int):
-        """Confirm the window pattern selection (0 = global, 1+ = segment index)"""
-        global pending_spot_name, pending_spot_coords, window_title_segments
+        """Confirm the window pattern selection (0 = global, 1+ = suggestion index)"""
+        global pending_spot_name, pending_spot_coords, pending_suggestions
         
         if pending_spot_name is None or pending_spot_coords is None:
             actions.user.spot_cancel_window_selection()
@@ -304,29 +315,48 @@ class SpotClass:
             # Save as global
             window_pattern = None
             pattern_desc = "global"
-        elif 1 <= choice <= len(window_title_segments):
-            window_pattern = window_title_segments[choice - 1]
+        elif 1 <= choice <= len(pending_suggestions):
+            window_pattern = pending_suggestions[choice - 1]["pattern"]
             pattern_desc = f"window: {window_pattern}"
         else:
-            actions.user.spot_cancel_window_selection()
+            app.notify(f"Invalid choice: {choice}")
             return
         
         add_spot_to_csv(pending_spot_name, pending_spot_coords[0], pending_spot_coords[1], window_pattern)
         app.notify(f"Saved spot: {pending_spot_name} ({pattern_desc})")
         
         # Cleanup
-        pending_spot_name = None
-        pending_spot_coords = None
-        window_title_segments = []
-        ctx.tags = []
-        gui_select_window_pattern.hide()
+        actions.user.spot_cancel_window_selection()
+
+    def spot_confirm_custom_pattern(pattern: str):
+        """Confirm a custom window pattern typed by the user"""
+        global pending_spot_name, pending_spot_coords
+        
+        if pending_spot_name is None or pending_spot_coords is None:
+            actions.user.spot_cancel_window_selection()
+            return
+        
+        pattern = pattern.strip()
+        if not pattern:
+            app.notify("Empty pattern - saving as global")
+            window_pattern = None
+            pattern_desc = "global"
+        else:
+            window_pattern = pattern
+            pattern_desc = f"window: {window_pattern}"
+        
+        add_spot_to_csv(pending_spot_name, pending_spot_coords[0], pending_spot_coords[1], window_pattern)
+        app.notify(f"Saved spot: {pending_spot_name} ({pattern_desc})")
+        
+        # Cleanup
+        actions.user.spot_cancel_window_selection()
 
     def spot_cancel_window_selection():
         """Cancel the window pattern selection"""
-        global pending_spot_name, pending_spot_coords, window_title_segments
+        global pending_spot_name, pending_spot_coords, pending_suggestions
         pending_spot_name = None
         pending_spot_coords = None
-        window_title_segments = []
+        pending_suggestions = []
         ctx.tags = []
         gui_select_window_pattern.hide()
 

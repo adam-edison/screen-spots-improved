@@ -129,6 +129,14 @@ def get_current_window_title() -> str:
         return ""
 
 
+def get_current_app_name() -> str:
+    """Get the current window's application name"""
+    try:
+        return ui.active_window().app.name or ""
+    except:
+        return ""
+
+
 def spot_matches_current_window(spot: dict) -> bool:
     """Check if a spot matches the current window (or is global)"""
     import re
@@ -137,6 +145,12 @@ def spot_matches_current_window(spot: dict) -> bool:
     if window_pattern is None:
         # Global spot - always matches
         return True
+    
+    # Check if it's an app-specific pattern (app:AppName)
+    if window_pattern.startswith("app:"):
+        app_pattern = window_pattern[4:]  # Remove "app:" prefix
+        current_app = get_current_app_name()
+        return app_pattern.lower() in current_app.lower()
     
     current_title = get_current_window_title()
     
@@ -237,10 +251,17 @@ def gui_list_keys(gui: imgui.GUI):
     gui.line()
 
     current_title = get_current_window_title()
+    current_app = get_current_app_name()
     for key, spot in spot_dictionary.items():
         window_pattern = spot.get("window_pattern")
         if window_pattern is None:
             gui.text(f"{key} (global)")
+        elif window_pattern.startswith("app:"):
+            app_pattern = window_pattern[4:]
+            if app_pattern.lower() in current_app.lower():
+                gui.text(f"{key} (this app: {app_pattern})")
+            else:
+                gui.text(f"{key} (app: {app_pattern})")
         elif window_pattern.lower() in current_title.lower():
             gui.text(f"{key} (this window: {window_pattern})")
         else:
@@ -292,12 +313,23 @@ class SpotClass:
         pending_spot_coords = [int(actions.mouse_x()), int(actions.mouse_y())]
         
         current_title = get_current_window_title()
+        current_app = get_current_app_name()
+        
+        # Get title-based suggestions
         pending_suggestions = get_suggested_patterns(current_title)
         
+        # Add app-based suggestion at the beginning if we have an app name
+        if current_app:
+            pending_suggestions.insert(0, {
+                "pattern": f"app:{current_app}",
+                "description": f"Any {current_app} window",
+                "type": "app"
+            })
+        
         if not pending_suggestions:
-            # No title to parse, save as global
+            # No title or app to parse, save as global
             add_spot_to_csv(spot_key, pending_spot_coords[0], pending_spot_coords[1], None)
-            app.notify(f"Saved global spot (no window title): {spot_key}")
+            app.notify(f"Saved global spot (no window info): {spot_key}")
             return
         
         ctx.tags = ["user.screen_spots_selecting"]

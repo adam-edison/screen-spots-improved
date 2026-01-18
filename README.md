@@ -5,7 +5,7 @@ Defines shortcuts for saving the current mouse coordinates to a specific word/ph
 
 The intended use case is to save the position of buttons or other frequently used locations so that you can click on them or return to them more quickly and with less effort.
 
-Your spots are stored in a CSV file (`screen-spots.csv`) that persists across Talon restarts and can be manually edited.
+Your spots are stored in CSV files that persist across Talon restarts and can be manually edited. The system automatically handles **multiple machines** and **multiple monitors** by creating separate profile-based CSV files.
 
 # Installation
 Assumes you already have Talon Voice: https://talonvoice.com/
@@ -76,9 +76,56 @@ Say **"spot edit file"** to open the CSV file in your text editor for manual edi
 
 Check screen-spots.talon for more commands. You can delete some or all spots.
 
+# Multi-Machine & Multi-Monitor Support
+
+Screen spots automatically handles different machines and monitor configurations. Each combination of **machine + screen + resolution** gets its own CSV file, so your spots won't break when you:
+
+- Use a different computer
+- Connect/disconnect external monitors
+- Change screen resolution
+
+## How It Works
+
+When you save a spot, the system detects:
+1. **Hostname** - which machine you're on
+2. **Screen index** - which monitor the mouse is on (0, 1, 2...)
+3. **Resolution** - the screen dimensions
+
+This creates a **profile** like: `MacBook-Pro-0-1920x1080` or `Work-Desktop-1-2560x1440`
+
+Each profile gets its own CSV file:
+```
+screen-spots-MacBook-Pro-0-1920x1080.csv
+screen-spots-MacBook-Pro-1-2560x1440.csv
+screen-spots-Work-Desktop-0-3840x2160.csv
+```
+
+## Multiple Monitors
+
+When you have multiple monitors connected:
+- Spots are saved to the screen where your mouse cursor is
+- Each screen has independent spots
+- The heatmap shows spots on all connected screens
+- Say **"spot profiles"** to see all active screen profiles
+
+## Syncing Across Machines
+
+You can sync this folder across machines (via Git, Dropbox, etc.). Each machine will:
+- Load only the CSV files that match its current screens
+- Ignore CSV files for other machines/resolutions
+- Create new CSV files when you save spots on new configurations
+
+## Migration
+
+If you had an existing `screen-spots.csv` file, it will be automatically migrated to your main screen's profile and backed up as `screen-spots-migrated-backup.csv`.
+
+## Reloading
+
+If you manually edit CSV files or connect/disconnect monitors, say **"spot reload"** to refresh the spots.
+
 # CSV File Format
 
-Spots are stored in `screen-spots.csv` with the following columns:
+Spots are stored in profile-specific CSV files (e.g., `screen-spots-MacBook-Pro-0-1920x1080.csv`) with the following columns:
 
 | Name | X | Y | WindowPattern |
 |------|---|---|---------------|
@@ -121,13 +168,15 @@ You can use the following settings to customize how this tool functions. You can
 ## Management
 | Command | Description |
 |---------|-------------|
-| `spot list` | Show all spots |
+| `spot list` | Show all spots (grouped by profile) |
 | `spot close` | Close the spot list |
 | `spot heatmap` | Toggle visual overlay |
 | `spot clear <name>` | Delete a specific spot |
-| `spot clear all` | Delete all spots |
+| `spot clear all` | Delete all spots for current screens |
 | `spot clear all window` | Delete spots matching current window |
 | `spot edit file` | Open CSV file for editing |
+| `spot reload` | Reload spots from CSV files |
+| `spot profiles` | Show current screen profiles |
 
 ## Selection GUI (when saving window spot)
 | Command | Description |

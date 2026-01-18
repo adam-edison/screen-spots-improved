@@ -9,6 +9,51 @@ This module can be run standalone to test parsing:
 import re
 
 
+def _url_to_domain(match) -> str:
+    """Extract domain from URL, stripping protocol and path."""
+    full_url = match.group(0)
+    no_protocol = re.sub(r'^https?://', '', full_url)
+    domain = no_protocol.split('/')[0]
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    return domain
+
+
+def _replace_urls_with_domains(title: str) -> str:
+    """Replace URLs in title with just their domains."""
+    url_pattern = r'https?://[^\s]+'
+    return re.sub(url_pattern, _url_to_domain, title)
+
+
+def _split_on_delimiters(title: str) -> list[str]:
+    """Split title on common delimiters."""
+    delimiter_pattern = r'\s+[|—–]\s+|\s+-\s+|\s+:\s+|:\s+'
+    return re.split(delimiter_pattern, title)
+
+
+def _filter_segments(segments: list[str], min_length: int) -> list[str]:
+    """Filter segments by minimum length and strip whitespace."""
+    return [seg.strip() for seg in segments if seg.strip() and len(seg.strip()) >= min_length]
+
+
+def _dedupe_segments(segments: list[str]) -> list[str]:
+    """Remove duplicate segments (case-insensitive) while preserving order."""
+    seen = set()
+    unique = []
+    for seg in segments:
+        seg_lower = seg.lower()
+        if seg_lower not in seen:
+            seen.add(seg_lower)
+            unique.append(seg)
+    return unique
+
+
+def _build_combined_pattern(segments: list[str]) -> str:
+    """Build a combined regex pattern from segments using lookaheads."""
+    escaped = [re.escape(seg) for seg in segments]
+    return "".join(f"(?=.*{seg})" for seg in escaped)
+
+
 def parse_window_title_segments(title: str, min_length: int = 3) -> list[str]:
     """
     Parse a window title into meaningful segments by splitting on common delimiters.
@@ -37,81 +82,50 @@ def parse_window_title_segments(title: str, min_length: int = 3) -> list[str]:
     if not title or not title.strip():
         return []
     
-    title = title.strip()
+    processed_title = _replace_urls_with_domains(title.strip())
+    segments = _split_on_delimiters(processed_title)
+    filtered = _filter_segments(segments, min_length)
+    unique_segments = _dedupe_segments(filtered)
     
-    # First, find and process URLs - replace with just the domain
-    # Match URLs: protocol, then everything until whitespace or delimiter-with-spaces
-    url_pattern = r'https?://[^\s]+'
-    
-    def url_to_domain(match):
-        """Extract domain from URL, stripping protocol and path"""
-        full_url = match.group(0)  # The full URL match
-        # Remove protocol
-        no_protocol = re.sub(r'^https?://', '', full_url)
-        # Get just the domain (first part before any /)
-        domain = no_protocol.split('/')[0]
-        # Remove www. prefix if present
-        if domain.startswith('www.'):
-            domain = domain[4:]
-        return domain
-    
-    # Replace URLs with their domains
-    processed_title = re.sub(url_pattern, url_to_domain, title)
-    
-    # Split by delimiters (order matters - try longer patterns first)
-    # Pattern: space-delimiter-space combinations
-    delimiter_pattern = r'\s+[|—–]\s+|\s+-\s+|\s+:\s+|:\s+'
-    
-    segments = re.split(delimiter_pattern, processed_title)
-    
-    # Clean up segments
-    cleaned_segments = []
-    for seg in segments:
-        seg = seg.strip()
-        # Skip empty, too short, or single-character segments
-        if seg and len(seg) >= min_length:
-            cleaned_segments.append(seg)
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_segments = []
-    for seg in cleaned_segments:
-        # Use lowercase for dedup comparison but keep original case
-        seg_lower = seg.lower()
-        if seg_lower not in seen:
-            seen.add(seg_lower)
-            unique_segments.append(seg)
-    
-    # If we have multiple segments, offer a combined regex pattern
-    # Uses lookaheads so all segments must be present but order doesn't matter
     if len(unique_segments) > 1:
-        # Escape regex special chars in each segment, then wrap in lookahead
-        escaped_segments = [re.escape(seg) for seg in unique_segments]
-        combined = "".join(f"(?=.*{seg})" for seg in escaped_segments)
-        unique_segments.append(combined)
+        unique_segments.append(_build_combined_pattern(unique_segments))
     
     return unique_segments
 
 
+FILE_EXTENSIONS = {'.md', '.py', '.js', '.ts', '.txt', '.json', '.csv', '.html', '.css', 
+                   '.xml', '.yml', '.yaml', '.sh', '.bat', '.exe', '.app', '.pdf', '.doc',
+                   '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.gif', '.svg'}
+
+
+def _has_file_extension(text: str) -> bool:
+    """Check if text ends with a common file extension."""
+    text_lower = text.lower()
+    return any(text_lower.endswith(ext) for ext in FILE_EXTENSIONS)
+
+
+def _matches_domain_pattern(text: str) -> bool:
+    """Check if text matches the domain name pattern."""
+    return bool(re.match(r'^[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+$', text))
+
+
 def is_domain(text: str) -> bool:
     """Check if text looks like a domain name (not a filename)."""
-    # Must look like a domain: word.tld or subdomain.word.tld
-    # Exclude common file extensions
-    file_extensions = {'.md', '.py', '.js', '.ts', '.txt', '.json', '.csv', '.html', '.css', 
-                       '.xml', '.yml', '.yaml', '.sh', '.bat', '.exe', '.app', '.pdf', '.doc',
-                       '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.gif', '.svg'}
-    
-    text_lower = text.lower()
-    for ext in file_extensions:
-        if text_lower.endswith(ext):
-            return False
-    
-    # Check if it looks like a domain (has a dot, ends with valid TLD-like suffix)
     if '.' not in text:
         return False
-    
-    # Common TLDs and patterns
-    return bool(re.match(r'^[a-zA-Z0-9][-a-zA-Z0-9]*(\.[a-zA-Z0-9][-a-zA-Z0-9]*)+$', text))
+    if _has_file_extension(text):
+        return False
+    return _matches_domain_pattern(text)
+
+
+def _classify_segment(seg: str, is_last: bool, total_segments: int) -> dict:
+    """Classify a segment and return its suggestion dict."""
+    is_combined = total_segments > 1 and is_last and seg.startswith("(?=")
+    if is_combined:
+        return {"pattern": seg, "description": "Combined (all segments)", "type": "combined"}
+    if is_domain(seg):
+        return {"pattern": seg, "description": "Domain", "type": "domain"}
+    return {"pattern": seg, "description": "Title segment", "type": "segment"}
 
 
 def get_suggested_patterns(title: str) -> list[dict]:
@@ -123,38 +137,17 @@ def get_suggested_patterns(title: str) -> list[dict]:
         - "description": human-readable description
         - "type": "segment", "domain", or "combined"
     """
+    segments = parse_window_title_segments(title)
     suggestions = []
     seen_patterns = set()
-    
-    segments = parse_window_title_segments(title)
     
     for i, seg in enumerate(segments):
         seg_lower = seg.lower()
         if seg_lower in seen_patterns:
             continue
         seen_patterns.add(seg_lower)
-        
-        # The last segment (if we have multiple) is the combined regex version
-        is_combined = (len(segments) > 1 and i == len(segments) - 1 and seg.startswith("(?="))
-        
-        if is_combined:
-            suggestions.append({
-                "pattern": seg,
-                "description": "Combined (all segments)",
-                "type": "combined"
-            })
-        elif is_domain(seg):
-            suggestions.append({
-                "pattern": seg,
-                "description": "Domain",
-                "type": "domain"
-            })
-        else:
-            suggestions.append({
-                "pattern": seg,
-                "description": "Title segment",
-                "type": "segment"
-            })
+        is_last = i == len(segments) - 1
+        suggestions.append(_classify_segment(seg, is_last, len(segments)))
     
     return suggestions
 
@@ -315,43 +308,44 @@ def run_tests():
     ]
     
     print("Running window title parser tests...\n")
-    passed = 0
-    failed = 0
-    
-    for i, (title, should_contain, should_not_contain) in enumerate(test_cases, 1):
-        segments = parse_window_title_segments(title)
-        
-        errors = []
-        
-        # Check that expected segments are present
-        for expected in should_contain:
-            if expected not in segments:
-                errors.append(f"  Missing expected segment: '{expected}'")
-        
-        # Check that unwanted segments are not present
-        for unwanted in should_not_contain:
-            if unwanted in segments:
-                errors.append(f"  Found unwanted segment: '{unwanted}'")
-        
-        if errors:
-            failed += 1
-            print(f"FAIL Test {i}: {title[:50]}...")
-            print(f"  Got: {segments}")
-            for err in errors:
-                print(err)
-            print()
-        else:
-            passed += 1
-            print(f"PASS Test {i}: {title[:50]}...")
-            print(f"  Got: {segments}")
-            print()
+    results = [_run_single_test(i, tc) for i, tc in enumerate(test_cases, 1)]
+    passed = sum(1 for r in results if r)
+    failed = len(results) - passed
     
     print(f"\n{'='*50}")
     print(f"Results: {passed} passed, {failed} failed out of {len(test_cases)} tests")
+    return failed == 0
+
+
+def _check_test_errors(segments: list[str], should_contain: list[str], should_not_contain: list[str]) -> list[str]:
+    """Check for test errors and return list of error messages."""
+    missing = [f"  Missing expected segment: '{e}'" for e in should_contain if e not in segments]
+    unwanted = [f"  Found unwanted segment: '{u}'" for u in should_not_contain if u in segments]
+    return missing + unwanted
+
+
+def _run_single_test(test_num: int, test_case: tuple) -> bool:
+    """Run a single test case and print results. Returns True if passed."""
+    title, should_contain, should_not_contain = test_case
+    segments = parse_window_title_segments(title)
+    errors = _check_test_errors(segments, should_contain, should_not_contain)
     
-    if failed > 0:
-        return False
-    return True
+    status = "FAIL" if errors else "PASS"
+    print(f"{status} Test {test_num}: {title[:50]}...")
+    print(f"  Got: {segments}")
+    for err in errors:
+        print(err)
+    print()
+    return not errors
+
+
+def _print_suggestions_for_title(title: str):
+    """Print suggestions for a single title."""
+    print(f"Title: {title}")
+    suggestions = get_suggested_patterns(title)
+    for i, sug in enumerate(suggestions, 1):
+        print(f"  {i}. [{sug['type']}] {sug['pattern']}")
+    print()
 
 
 def test_suggestions():
@@ -367,11 +361,7 @@ def test_suggestions():
     ]
     
     for title in test_titles:
-        print(f"Title: {title}")
-        suggestions = get_suggested_patterns(title)
-        for i, sug in enumerate(suggestions, 1):
-            print(f"  {i}. [{sug['type']}] {sug['pattern']}")
-        print()
+        _print_suggestions_for_title(title)
 
 
 if __name__ == "__main__":
